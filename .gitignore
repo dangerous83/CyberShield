@@ -14,3 +14,6 @@ desktop.ini
 
 # Claude Code local settings
 .claude/
+
+# Local .git backups from one-time restructure
+.git-backup-*/
