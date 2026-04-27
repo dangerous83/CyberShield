@@ -1683,9 +1683,19 @@ html,body{overflow-x:hidden;max-width:100%;}
 if (window.lucide) lucide.createIcons();
 gsap.registerPlugin(ScrollTrigger);
 
-/* Pre-warm the speech synthesis voice list so en-GB Ryan is ready when Enter is clicked */
+/* Pre-warm the speech synthesis voice list so en-GB Ryan is ready when Enter is clicked.
+   On iOS Safari and some Android browsers the voice list loads asynchronously and the
+   'voiceschanged' event is unreliable, so we also poll a few times after first paint. */
 if ('speechSynthesis' in window) {
   try { speechSynthesis.getVoices(); } catch(_) {}
+  let voicePolls = 0;
+  const voicePoll = setInterval(() => {
+    try {
+      const v = speechSynthesis.getVoices();
+      if (v && v.length) { clearInterval(voicePoll); }
+    } catch(_) {}
+    if (++voicePolls > 20) clearInterval(voicePoll); // ~6s of polling
+  }, 300);
 }
 
 /* ========== CYBER SFX (shared high-tech audio bus) ========== */
@@ -2029,46 +2039,122 @@ window.csSfx = (function(){
   };
 })();
 
-/* ========== RYAN VOICE-OVER HELPER (Microsoft Ryan Natural · en-GB) ========== */
-window.speakRyan = function(text, opts){
-  if (!('speechSynthesis' in window)) return;
-  opts = opts || {};
-  const pickRyan = () => {
-    const voices = speechSynthesis.getVoices();
+/* ========== RYAN VOICE-OVER HELPER (Microsoft Ryan Natural · en-GB)
+   On Windows/Edge desktop we get Microsoft Ryan Natural directly.
+   On Edge mobile (iOS/Android) we get Microsoft Ryan Online Natural via the cloud.
+   On Safari iOS / Chrome Android — Ryan Natural does not exist offline, so we pick
+   the closest male British voice (Daniel on iOS, Google UK English Male on Android)
+   and tune rate/pitch so the character stays as close to Ryan as possible. ========== */
+(function(){
+  const UA = navigator.userAgent || '';
+  const isIOS = /iPad|iPhone|iPod/.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isAndroid = /Android/.test(UA);
+  const isMobile = isIOS || isAndroid;
+
+  function pickRyan(){
+    let voices = [];
+    try { voices = speechSynthesis.getVoices() || []; } catch(_) { voices = []; }
     if (!voices.length) return null;
     return (
-      voices.find(v => /microsoft.*ryan.*natural/i.test(v.name)) ||
+      // 1. Exact Ryan Natural (Windows desktop, Edge desktop)
       voices.find(v => /microsoft.*ryan.*online.*natural/i.test(v.name)) ||
+      voices.find(v => /microsoft.*ryan.*natural/i.test(v.name)) ||
       voices.find(v => /ryan.*natural/i.test(v.name)) ||
       voices.find(v => /ryan/i.test(v.name) && /en[-_]?gb/i.test(v.lang || '')) ||
       voices.find(v => /ryan/i.test(v.name)) ||
-      voices.find(v => /en[-_]?gb/i.test(v.lang || '') && /natural|online/i.test(v.name)) ||
+      // 2. Other Edge "Online (Natural)" male en-GB voices (cloud, available on Edge mobile)
+      voices.find(v => /en[-_]?gb/i.test(v.lang || '') && /online.*natural/i.test(v.name) && /(male|ryan|thomas|george|noah|liam|elliot|alfie)/i.test(v.name)) ||
+      voices.find(v => /en[-_]?gb/i.test(v.lang || '') && /online.*natural/i.test(v.name)) ||
+      voices.find(v => /en[-_]?gb/i.test(v.lang || '') && /natural/i.test(v.name)) ||
+      // 3. iOS Safari fallback — Daniel (en-GB, male, British) is the closest match
+      voices.find(v => /^daniel/i.test(v.name) && /en[-_]?gb/i.test(v.lang || '')) ||
+      voices.find(v => /^daniel/i.test(v.name)) ||
+      voices.find(v => /^arthur/i.test(v.name) && /en[-_]?gb/i.test(v.lang || '')) ||
+      voices.find(v => /^oliver/i.test(v.name) && /en[-_]?gb/i.test(v.lang || '')) ||
+      // 4. Android Chrome fallback — Google UK English Male
+      voices.find(v => /google.*uk.*english.*male/i.test(v.name)) ||
+      voices.find(v => /google.*english.*uk.*male/i.test(v.name)) ||
+      voices.find(v => /google/i.test(v.name) && /en[-_]?gb/i.test(v.lang || '')) ||
+      // 5. Other Microsoft male British voices
+      voices.find(v => /microsoft.*george/i.test(v.name)) ||
+      voices.find(v => /microsoft.*hazel/i.test(v.name)) ||
+      // 6. Last resort — any en-GB voice, then anything English
       voices.find(v => /en[-_]?gb/i.test(v.lang || '')) ||
+      voices.find(v => /^en/i.test(v.lang || '')) ||
+      voices[0] ||
       null
     );
-  };
-  const doSpeak = () => {
-    const voice = pickRyan();
-    const u = new SpeechSynthesisUtterance(text);
-    if (voice) u.voice = voice;
-    u.lang = 'en-GB';
-    u.rate = (typeof opts.rate === 'number') ? opts.rate : 1.1;
-    u.pitch = (typeof opts.pitch === 'number') ? opts.pitch : 1.02;
-    u.volume = (typeof opts.volume === 'number') ? opts.volume : 1.0;
-    try { speechSynthesis.cancel(); } catch(_) {}
-    speechSynthesis.speak(u);
-  };
-  if (speechSynthesis.getVoices().length > 0){
-    doSpeak();
-  } else {
-    const onVoices = () => {
-      speechSynthesis.removeEventListener('voiceschanged', onVoices);
-      doSpeak();
-    };
-    speechSynthesis.addEventListener('voiceschanged', onVoices);
-    setTimeout(doSpeak, 600);
   }
-};
+
+  // iOS requires the very first speak() to happen inside a user gesture. The boot
+  // "Initialize System" click handles that, but we also fire a silent priming
+  // utterance on first touch/click anywhere as a safety net so Ryan never ends up muted.
+  let primed = false;
+  function primeOnce(){
+    if (primed || !('speechSynthesis' in window)) return;
+    primed = true;
+    try {
+      const u = new SpeechSynthesisUtterance('');
+      u.volume = 0; u.rate = 1; u.pitch = 1; u.lang = 'en-GB';
+      speechSynthesis.speak(u);
+    } catch(_) {}
+  }
+  ['touchstart','pointerdown','click','keydown'].forEach(ev => {
+    window.addEventListener(ev, primeOnce, { once: true, passive: true, capture: true });
+  });
+
+  window.speakRyan = function(text, opts){
+    if (!('speechSynthesis' in window)) return;
+    opts = opts || {};
+    const doSpeak = () => {
+      const voice = pickRyan();
+      const u = new SpeechSynthesisUtterance(text);
+      if (voice) { u.voice = voice; u.lang = voice.lang || 'en-GB'; }
+      else { u.lang = 'en-GB'; }
+
+      // Tune rate/pitch so non-Ryan fallbacks (Daniel on iOS, Google UK Male on Android)
+      // stay close to Ryan's character. Daniel is naturally a touch slower and lower-pitched
+      // than Ryan, so on iOS we nudge rate up and pitch up slightly.
+      let rate  = (typeof opts.rate  === 'number') ? opts.rate  : 1.1;
+      let pitch = (typeof opts.pitch === 'number') ? opts.pitch : 1.02;
+      if (voice && /^daniel/i.test(voice.name)) { rate += 0.08; pitch += 0.06; }
+      else if (voice && /google.*uk.*english.*male/i.test(voice.name)) { rate += 0.05; pitch += 0.04; }
+      else if (isMobile && voice && !/ryan/i.test(voice.name)) { rate += 0.04; pitch += 0.03; }
+      u.rate   = Math.max(0.5, Math.min(2, rate));
+      u.pitch  = Math.max(0.5, Math.min(2, pitch));
+      u.volume = (typeof opts.volume === 'number') ? opts.volume : 1.0;
+
+      try { speechSynthesis.cancel(); } catch(_) {}
+      // iOS Safari sometimes pauses the queue when the tab loses focus — resume defensively.
+      try { speechSynthesis.resume(); } catch(_) {}
+      speechSynthesis.speak(u);
+    };
+
+    let voices = [];
+    try { voices = speechSynthesis.getVoices() || []; } catch(_) {}
+    if (voices.length > 0){
+      doSpeak();
+    } else {
+      let fired = false;
+      const fire = () => { if (!fired){ fired = true; doSpeak(); } };
+      const onVoices = () => {
+        speechSynthesis.removeEventListener('voiceschanged', onVoices);
+        fire();
+      };
+      speechSynthesis.addEventListener('voiceschanged', onVoices);
+      // Fallback timers — iOS Safari sometimes never fires voiceschanged.
+      setTimeout(fire, 600);
+      setTimeout(fire, 1500);
+      setTimeout(fire, 3000);
+    }
+  };
+
+  // Tiny debug helper — run csWhichVoice() in the mobile console to see which voice is in use.
+  window.csWhichVoice = function(){
+    const v = pickRyan();
+    return v ? (v.name + ' [' + v.lang + ']') : '(none — voice list not loaded yet)';
+  };
+})();
 
 /* ========== BOOT OVERLAY (tap-to-initialize → cybersecurity loading → password gate → voice over) ========== */
 (function(){
